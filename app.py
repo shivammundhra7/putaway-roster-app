@@ -111,7 +111,7 @@ if uploaded_file is not None:
                     }
 
                 # ==========================================
-                # 4. ROSTER GENERATION LOGIC (V10 Engine)
+                # 4. ROSTER GENERATION LOGIC
                 # ==========================================
                 roles = df_emp['Role'].unique()
 
@@ -185,8 +185,9 @@ if uploaded_file is not None:
                                     if state['Lock_State'] == 'N' and state['WOs_Remaining'] == 1:
                                         continue 
                                         
-                                    # 2. Streak Survival Protection (Mathematical Lookahead)
-                                    if (days_left - 1) > (state['WOs_Remaining'] - 1) * 10:
+                                    # 2. FIXED: Streak Survival Protection
+                                    # Properly calculates the maximum survivable days without a streak violation
+                                    if (days_left - 1) > (state['WOs_Remaining'] - 1) * 10 + 9:
                                         continue
 
                                     candidates.append(e)
