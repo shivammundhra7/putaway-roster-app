@@ -17,7 +17,7 @@ uploaded_file = st.file_uploader("Upload Input Excel File (.xlsx)", type=["xlsx"
 
 if uploaded_file is not None:
     if st.button("🚀 Generate Roster", use_container_width=True):
-        with st.spinner("Crunching the numbers and balancing shifts... Please wait."):
+        with st.spinner("Crunching the numbers and balancing shifts within the 45-50% bands... Please wait."):
             try:
                 # ==========================================
                 # 2. LOAD STANDARDIZED DATA
@@ -35,13 +35,11 @@ if uploaded_file is not None:
                 except Exception:
                     pref_dict = {}
 
-                # Clean strings
                 df_emp['Role'] = df_emp['Role'].astype(str).str.strip()
                 df_targets['Role'] = df_targets['Role'].astype(str).str.strip()
                 df_emp['Emp_ID'] = df_emp['Emp_ID'].astype(str).str.strip()
                 df_prev['Emp_ID'] = df_prev['Emp_ID'].astype(str).str.strip()
 
-                # Dynamically determine the roster month based on the targets sheet
                 df_targets['Date'] = pd.to_datetime(df_targets['Date'])
                 df_leaves['Date'] = pd.to_datetime(df_leaves['Date'])
                 
@@ -50,11 +48,10 @@ if uploaded_file is not None:
                 roster_days = pd.date_range(start=roster_start, end=roster_end)
 
                 # ==========================================
-                # 3. INITIALIZE EMPLOYEES (MONTH-AGNOSTIC)
+                # 3. INITIALIZE EMPLOYEES
                 # ==========================================
                 emp_state = {}
                 
-                # Automatically find date columns from the previous month's sheet
                 exclude_cols = ['Emp_ID', 'Role', 'Name', 'NAME', 'Gender']
                 prev_date_cols = [c for c in df_prev.columns if c not in exclude_cols]
 
@@ -77,7 +74,6 @@ if uploaded_file is not None:
                     
                     if not prev_data.empty:
                         prev_row = prev_data.iloc[0]
-                        # Look backward through the previous month's actual attendance columns
                         for d in reversed(prev_date_cols):
                             if d not in prev_row: continue
                             val = str(prev_row[d]).strip().upper()
@@ -94,6 +90,7 @@ if uploaded_file is not None:
                                 
                     min_n = 0
                     max_n = 20
+                    is_default = True
                     if row['Gender'] == 'Male':
                         pref_str = str(pref_dict.get(emp_id, '')).strip()
                         if '-' in pref_str:
@@ -101,10 +98,12 @@ if uploaded_file is not None:
                                 parts = pref_str.split('-')
                                 min_n = int(parts[0])
                                 max_n = int(parts[1])
+                                is_default = False
                             except:
                                 pass
                     else:
                         max_n = 0 
+                        is_default = False 
 
                     emp_state[emp_id] = {
                         'Role': row['Role'],
@@ -115,12 +114,13 @@ if uploaded_file is not None:
                         'Night_Count': 0, 
                         'Min_Nights': min_n,
                         'Max_Nights': max_n,
+                        'Is_Default_Pref': is_default,
                         'Lock_State': last_shift_state,
                         'Schedule': {}
                     }
 
                 # ==========================================
-                # 4. ROSTER GENERATION LOGIC 
+                # 4. ROSTER GENERATION LOGIC (V12)
                 # ==========================================
                 roles = df_emp['Role'].unique()
 
@@ -168,22 +168,23 @@ if uploaded_file is not None:
                                     must_wo.append(emp)
                                 elif state['Current_Streak'] >= 9: 
                                     must_wo.append(emp)
-                                elif state['Lock_State'] == 'N' and state['Night_Count'] >= state['Max_Nights']: 
-                                    must_wo.append(emp)
                                 
                         assigned_wos = must_wo.copy()
                         
                         if not is_zero_wo and len(assigned_wos) < dynamic_wo_target:
                             planned_mp_est = total_active - dynamic_wo_target
-                            target_n_est = round(planned_mp_est * 0.48)
-                            target_d_est = planned_mp_est - target_n_est
+                            
+                            # V12 Range logic for WOs
+                            target_n_est_max = math.floor(planned_mp_est * 0.50)
+                            target_d_est_max = math.floor(planned_mp_est * 0.55)
                             
                             rem_active = [e for e in active_emps if e not in assigned_wos]
                             curr_locked_n = len([e for e in rem_active if emp_state[e]['Lock_State'] == 'N'])
                             curr_locked_d = len([e for e in rem_active if emp_state[e]['Lock_State'] == 'D'])
                             
-                            surplus_n = curr_locked_n - target_n_est
-                            surplus_d = curr_locked_d - target_d_est
+                            # Only give balancing WOs if a shift is completely exceeding its allowed max boundary
+                            surplus_n = curr_locked_n - target_n_est_max
+                            surplus_d = curr_locked_d - target_d_est_max
 
                             candidates = []
                             for e in rem_active:
@@ -191,7 +192,6 @@ if uploaded_file is not None:
                                 if state['WOs_Remaining'] > 0:
                                     if state['Lock_State'] == 'N' and state['WOs_Remaining'] == 1:
                                         continue 
-                                        
                                     if (days_left - 1) > (state['WOs_Remaining'] - 1) * 10 + 9:
                                         continue
 
@@ -226,7 +226,10 @@ if uploaded_file is not None:
                                 working_emps.append(emp)
                                 
                         planned_mp = len(working_emps)
-                        target_n = round(planned_mp * 0.48) 
+                        
+                        # V12: Shift assignment targets
+                        min_target_n = math.ceil(planned_mp * 0.45)
+                        max_target_n = math.floor(planned_mp * 0.50)
                         
                         locked_n = [e for e in working_emps if emp_state[e]['Lock_State'] == 'N']
                         locked_d = [e for e in working_emps if emp_state[e]['Lock_State'] == 'D']
@@ -241,7 +244,7 @@ if uploaded_file is not None:
                             emp_state[emp]['Schedule'][day] = 'D'
                             emp_state[emp]['Current_Streak'] += 1
                             
-                        shortfall_n = max(0, target_n - len(locked_n))
+                        curr_n = len(locked_n)
                         
                         eligible_free_males = []
                         for e in free_pool:
@@ -257,14 +260,37 @@ if uploaded_file is not None:
                             emp_state[x]['Night_Count']
                         ))
                         
-                        assigned_free_n = 0
+                        final_n_picks = []
+                        
+                        # 1. Fill safely up to the 50% max limit
+                        for emp in eligible_free_males:
+                            if curr_n < max_target_n:
+                                final_n_picks.append(emp)
+                                curr_n += 1
+                                
+                        # 2. EMERGENCY OVERRIDE: Only triggers if we physically failed to hit the 45% floor
+                        if curr_n < min_target_n:
+                            shortfall_min = min_target_n - curr_n
+                            emergency_males = [e for e in free_pool if emp_state[e]['Gender'] == 'Male' and e not in final_n_picks]
+                            
+                            emergency_males.sort(key=lambda x: (
+                                0 if emp_state[x].get('Is_Default_Pref', True) else 1,
+                                emp_state[x]['Night_Count']
+                            ))
+                            
+                            for emp in emergency_males:
+                                if shortfall_min > 0:
+                                    final_n_picks.append(emp)
+                                    curr_n += 1
+                                    shortfall_min -= 1
+
+                        # 3. Apply the final shifts
                         for emp in free_pool:
-                            if assigned_free_n < shortfall_n and emp in eligible_free_males:
+                            if emp in final_n_picks:
                                 emp_state[emp]['Schedule'][day] = 'N'
                                 emp_state[emp]['Night_Count'] += 1
                                 emp_state[emp]['Current_Streak'] += 1
                                 emp_state[emp]['Lock_State'] = 'N' 
-                                assigned_free_n += 1
                             else:
                                 emp_state[emp]['Schedule'][day] = 'D'
                                 emp_state[emp]['Current_Streak'] += 1
@@ -291,7 +317,6 @@ if uploaded_file is not None:
                 with pd.ExcelWriter(output_buffer, engine='xlsxwriter') as writer:
                     final_df.to_excel(writer, index=False, sheet_name='Generated_Roster')
                 
-                # Dynamic File Name based on the current roster month
                 month_name = roster_start.strftime('%B_%Y')
                 out_filename = f"{month_name}_Final_Roster.xlsx"
 
