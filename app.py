@@ -11,7 +11,7 @@ import io
 st.set_page_config(page_title="Putaway Roster Generator", page_icon="📅", layout="centered")
 
 st.title("📅 Automated Putaway Roster")
-st.markdown("Upload your populated **Putaway_Roster.xlsx** file below to generate the monthly schedule.")
+st.markdown("Upload your standardized **Putaway_Roster.xlsx** template below to generate the monthly schedule.")
 
 uploaded_file = st.file_uploader("Upload Input Excel File (.xlsx)", type=["xlsx"])
 
@@ -20,46 +20,54 @@ if uploaded_file is not None:
         with st.spinner("Crunching the numbers and balancing shifts... Please wait."):
             try:
                 # ==========================================
-                # 2. LOAD DATA FROM UPLOAD
+                # 2. LOAD STANDARDIZED DATA
                 # ==========================================
-                df_may = pd.read_excel(uploaded_file, sheet_name='May_Attendance')
-                df_targets = pd.read_excel(uploaded_file, sheet_name='June_Daily_Targets')
-                df_leaves = pd.read_excel(uploaded_file, sheet_name='June_Planned_Leaves')
-                df_emp = pd.read_excel(uploaded_file, sheet_name='June_Employee_Master')
+                df_prev = pd.read_excel(uploaded_file, sheet_name='Previous_Month_Attendance')
+                df_targets = pd.read_excel(uploaded_file, sheet_name='Daily_Targets')
+                df_leaves = pd.read_excel(uploaded_file, sheet_name='Planned_Leaves')
+                df_emp = pd.read_excel(uploaded_file, sheet_name='Employee_Master')
 
                 try:
-                    df_prefs = pd.read_excel(uploaded_file, sheet_name='June_Night_Preferences')
+                    df_prefs = pd.read_excel(uploaded_file, sheet_name='Night_Preferences')
                     df_prefs['Emp_ID'] = df_prefs['Emp_ID'].astype(str).str.strip()
                     df_prefs = df_prefs.drop_duplicates(subset=['Emp_ID'], keep='last')
                     pref_dict = df_prefs.set_index('Emp_ID')['Night_Shift_Pref'].to_dict()
                 except Exception:
                     pref_dict = {}
 
+                # Clean strings
                 df_emp['Role'] = df_emp['Role'].astype(str).str.strip()
                 df_targets['Role'] = df_targets['Role'].astype(str).str.strip()
                 df_emp['Emp_ID'] = df_emp['Emp_ID'].astype(str).str.strip()
-                df_may['Emp_ID'] = df_may['Emp_ID'].astype(str).str.strip()
+                df_prev['Emp_ID'] = df_prev['Emp_ID'].astype(str).str.strip()
 
+                # Dynamically determine the roster month based on the targets sheet
                 df_targets['Date'] = pd.to_datetime(df_targets['Date'])
                 df_leaves['Date'] = pd.to_datetime(df_leaves['Date'])
-                days_in_june = pd.date_range(start='2026-06-01', end='2026-06-30')
+                
+                roster_start = df_targets['Date'].min()
+                roster_end = df_targets['Date'].max()
+                roster_days = pd.date_range(start=roster_start, end=roster_end)
 
                 # ==========================================
-                # 3. INITIALIZE EMPLOYEES
+                # 3. INITIALIZE EMPLOYEES (MONTH-AGNOSTIC)
                 # ==========================================
                 emp_state = {}
-                may_date_cols = [f"{d}-May" for d in range(1, 32)]
+                
+                # Automatically find date columns from the previous month's sheet
+                exclude_cols = ['Emp_ID', 'Role', 'Name', 'NAME', 'Gender']
+                prev_date_cols = [c for c in df_prev.columns if c not in exclude_cols]
 
                 for _, row in df_emp.iterrows():
                     emp_id = row['Emp_ID']
-                    may_data = df_may[df_may['Emp_ID'] == emp_id]
+                    prev_data = df_prev[df_prev['Emp_ID'] == emp_id]
                     
                     target_wos = 4
                     if pd.notna(row['Date_of_Joining']):
                         try:
                             doj = pd.to_datetime(row['Date_of_Joining'])
-                            if doj >= pd.to_datetime('2026-06-01'):
-                                active_days = max(0, (pd.to_datetime('2026-06-30') - doj).days + 1)
+                            if doj >= roster_start:
+                                active_days = max(0, (roster_end - doj).days + 1)
                                 target_wos = active_days // 6
                         except:
                             pass 
@@ -67,11 +75,12 @@ if uploaded_file is not None:
                     last_shift_state = 'FREE' 
                     streak = 0
                     
-                    if not may_data.empty:
-                        may_row = may_data.iloc[0]
-                        for d in reversed(may_date_cols):
-                            if d not in may_row: continue
-                            val = str(may_row[d]).strip().upper()
+                    if not prev_data.empty:
+                        prev_row = prev_data.iloc[0]
+                        # Look backward through the previous month's actual attendance columns
+                        for d in reversed(prev_date_cols):
+                            if d not in prev_row: continue
+                            val = str(prev_row[d]).strip().upper()
                             
                             if val in ['P-M', 'P-E', 'P-D', 'E', 'M', 'D']:
                                 if streak == 0: last_shift_state = 'D'
@@ -111,12 +120,12 @@ if uploaded_file is not None:
                     }
 
                 # ==========================================
-                # 4. ROSTER GENERATION LOGIC
+                # 4. ROSTER GENERATION LOGIC 
                 # ==========================================
                 roles = df_emp['Role'].unique()
 
-                for day in days_in_june:
-                    days_left = (pd.to_datetime('2026-06-30') - day).days + 1
+                for day in roster_days:
+                    days_left = (roster_end - day).days + 1
                     
                     for role in roles:
                         role_emps = [e for e, data in emp_state.items() if data['Role'] == role]
@@ -152,7 +161,6 @@ if uploaded_file is not None:
                         else:
                             dynamic_wo_target = max(min_wo, min(target_run_rate, max_wo))
 
-                        # HARD GATEKEEPER
                         for emp in active_emps:
                             state = emp_state[emp]
                             if state['WOs_Remaining'] > 0:
@@ -181,12 +189,9 @@ if uploaded_file is not None:
                             for e in rem_active:
                                 state = emp_state[e]
                                 if state['WOs_Remaining'] > 0:
-                                    # 1. Exit Ticket Protection
                                     if state['Lock_State'] == 'N' and state['WOs_Remaining'] == 1:
                                         continue 
                                         
-                                    # 2. FIXED: Streak Survival Protection
-                                    # Properly calculates the maximum survivable days without a streak violation
                                     if (days_left - 1) > (state['WOs_Remaining'] - 1) * 10 + 9:
                                         continue
 
@@ -271,10 +276,10 @@ if uploaded_file is not None:
                 output_data = []
                 for emp_id, data in emp_state.items():
                     row_dict = {'Emp_ID': emp_id, 'Role': data['Role']}
-                    for day in days_in_june:
+                    for day in roster_days:
                         row_dict[day.strftime('%d-%b')] = data['Schedule'].get(day, '')
                     
-                    row_dict['Total_June_WOs'] = data['Starting_WOs'] - data['WOs_Remaining']
+                    row_dict['Total_WOs_Assigned'] = data['Starting_WOs'] - data['WOs_Remaining']
                     row_dict['Total_Night_Shifts'] = data['Night_Count']
                     row_dict['Target_Pref_Range'] = f"{data['Min_Nights']}-{data['Max_Nights']}" if data['Gender'] == 'Male' else "N/A"
                     
@@ -286,15 +291,19 @@ if uploaded_file is not None:
                 with pd.ExcelWriter(output_buffer, engine='xlsxwriter') as writer:
                     final_df.to_excel(writer, index=False, sheet_name='Generated_Roster')
                 
-                st.success("✅ Roster successfully generated!")
+                # Dynamic File Name based on the current roster month
+                month_name = roster_start.strftime('%B_%Y')
+                out_filename = f"{month_name}_Final_Roster.xlsx"
+
+                st.success(f"✅ {month_name.replace('_', ' ')} Roster successfully generated!")
                 
                 st.download_button(
                     label="⬇️ Download Final Roster (.xlsx)",
                     data=output_buffer.getvalue(),
-                    file_name="June_Final_Roster_Output.xlsx",
+                    file_name=out_filename,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
 
             except Exception as e:
-                st.error(f"⚠️ An error occurred. Please check your Excel formatting: {e}")
+                st.error(f"⚠️ An error occurred. Please ensure your sheet names match the exact new standard format: {e}")
