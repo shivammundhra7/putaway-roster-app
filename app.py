@@ -17,7 +17,7 @@ uploaded_file = st.file_uploader("Upload Input Excel File (.xlsx)", type=["xlsx"
 
 if uploaded_file is not None:
     if st.button("🚀 Generate Roster", use_container_width=True):
-        with st.spinner("Crunching the numbers and balancing shifts within the 45-50% bands... Please wait."):
+        with st.spinner("Enforcing strict maximum night limits... Please wait."):
             try:
                 # ==========================================
                 # 2. LOAD STANDARDIZED DATA
@@ -48,7 +48,7 @@ if uploaded_file is not None:
                 roster_days = pd.date_range(start=roster_start, end=roster_end)
 
                 # ==========================================
-                # 3. INITIALIZE EMPLOYEES
+                # 3. INITIALIZE EMPLOYEES (V13 - Bug Fixes)
                 # ==========================================
                 emp_state = {}
                 
@@ -91,8 +91,20 @@ if uploaded_file is not None:
                     min_n = 0
                     max_n = 20
                     is_default = True
+                    
                     if row['Gender'] == 'Male':
-                        pref_str = str(pref_dict.get(emp_id, '')).strip()
+                        pref_val = pref_dict.get(emp_id, '')
+                        
+                        # Fix for Excel's hidden Date Conversion Bug for "20-26"
+                        if isinstance(pref_val, datetime):
+                            pref_str = "20-26"
+                        else:
+                            pref_str = str(pref_val).strip()
+                            
+                        # Catch string versions of the date bug (e.g., "2026-7")
+                        if '2026' in pref_str or 'Jul' in pref_str:
+                            pref_str = "20-26"
+
                         if '-' in pref_str:
                             try:
                                 parts = pref_str.split('-')
@@ -120,7 +132,7 @@ if uploaded_file is not None:
                     }
 
                 # ==========================================
-                # 4. ROSTER GENERATION LOGIC (V12)
+                # 4. ROSTER GENERATION LOGIC 
                 # ==========================================
                 roles = df_emp['Role'].unique()
 
@@ -174,7 +186,6 @@ if uploaded_file is not None:
                         if not is_zero_wo and len(assigned_wos) < dynamic_wo_target:
                             planned_mp_est = total_active - dynamic_wo_target
                             
-                            # V12 Range logic for WOs
                             target_n_est_max = math.floor(planned_mp_est * 0.50)
                             target_d_est_max = math.floor(planned_mp_est * 0.55)
                             
@@ -182,7 +193,6 @@ if uploaded_file is not None:
                             curr_locked_n = len([e for e in rem_active if emp_state[e]['Lock_State'] == 'N'])
                             curr_locked_d = len([e for e in rem_active if emp_state[e]['Lock_State'] == 'D'])
                             
-                            # Only give balancing WOs if a shift is completely exceeding its allowed max boundary
                             surplus_n = curr_locked_n - target_n_est_max
                             surplus_d = curr_locked_d - target_d_est_max
 
@@ -227,8 +237,6 @@ if uploaded_file is not None:
                                 
                         planned_mp = len(working_emps)
                         
-                        # V12: Shift assignment targets
-                        min_target_n = math.ceil(planned_mp * 0.45)
                         max_target_n = math.floor(planned_mp * 0.50)
                         
                         locked_n = [e for e in working_emps if emp_state[e]['Lock_State'] == 'N']
@@ -246,6 +254,7 @@ if uploaded_file is not None:
                             
                         curr_n = len(locked_n)
                         
+                        # STRICT ENFORCEMENT: Only men under their absolute cap are eligible
                         eligible_free_males = []
                         for e in free_pool:
                             if emp_state[e]['Gender'] == 'Male' and emp_state[e]['Night_Count'] < emp_state[e]['Max_Nights']:
@@ -262,29 +271,12 @@ if uploaded_file is not None:
                         
                         final_n_picks = []
                         
-                        # 1. Fill safely up to the 50% max limit
+                        # Fill strictly up to the limit, NO EXCEPTIONS.
                         for emp in eligible_free_males:
                             if curr_n < max_target_n:
                                 final_n_picks.append(emp)
                                 curr_n += 1
-                                
-                        # 2. EMERGENCY OVERRIDE: Only triggers if we physically failed to hit the 45% floor
-                        if curr_n < min_target_n:
-                            shortfall_min = min_target_n - curr_n
-                            emergency_males = [e for e in free_pool if emp_state[e]['Gender'] == 'Male' and e not in final_n_picks]
-                            
-                            emergency_males.sort(key=lambda x: (
-                                0 if emp_state[x].get('Is_Default_Pref', True) else 1,
-                                emp_state[x]['Night_Count']
-                            ))
-                            
-                            for emp in emergency_males:
-                                if shortfall_min > 0:
-                                    final_n_picks.append(emp)
-                                    curr_n += 1
-                                    shortfall_min -= 1
 
-                        # 3. Apply the final shifts
                         for emp in free_pool:
                             if emp in final_n_picks:
                                 emp_state[emp]['Schedule'][day] = 'N'
@@ -331,4 +323,4 @@ if uploaded_file is not None:
                 )
 
             except Exception as e:
-                st.error(f"⚠️ An error occurred. Please ensure your sheet names match the exact new standard format: {e}")
+                st.error(f"⚠️ An error occurred: {e}")
